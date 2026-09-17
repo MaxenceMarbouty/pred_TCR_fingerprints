@@ -1,0 +1,209 @@
+import pandas as pd
+import re
+
+
+def get_top1_model(df, metrics):
+    grouped = df.groupby('pdb_id')
+    results = []
+    for pdb_id, group in grouped:
+        res = {'pdb_id': pdb_id}
+        for col in metrics:
+            idx_max = group[col].idxmax()
+            row = group.loc[idx_max]
+            res[f'max_{col}'] = row[col]
+            # values of all metrics at that same row
+            for m in metrics:
+                if m != col:
+                    res[f'{m}_at_max_{col}'] = row[m]
+
+        results.append(res)
+
+    # Combine results into a DataFrame
+    df_aggregated = pd.DataFrame(results)
+    return df_aggregated
+
+def pool_asymetric_chains(df):
+    df_process = df.copy()
+    chains = ['TRA', 'TRB', 'MHCA', 'pep']
+    pairs_found = {}
+    pae_cols = [c for c in df.columns if "pae" in c]
+    ipsae_cols = [c for c in df.columns if "ipsae" in c]
+    pdockq_cols = [c for c in df.columns if "pdockq" in c]
+    process_cols = pae_cols + ipsae_cols + pdockq_cols
+
+    for col in process_cols:
+        for c1 in chains:
+            for c2 in chains:
+                if c1 == c2:
+                    continue
+                prefix_fwd = f"{c1}_{c2}_"
+                prefix_rev = f"{c2}_{c1}_"
+                if col.startswith(prefix_fwd):
+                    suffix = col[len(prefix_fwd):]
+                    reverse_metric = f"{prefix_rev}{suffix}"
+
+                    if reverse_metric in process_cols:
+                        # Canonical key: always sort chain names alphabetically
+                        key = tuple(sorted([c1, c2])) + (suffix,)
+                        if key not in pairs_found:
+                            pairs_found[key] = {
+                                'metric_1': col,
+                                'metric_2': reverse_metric,
+                                'suffix': suffix,
+                                'chains': (c1, c2)
+                            }
+    
+    cols_to_drop = []
+    
+    for key, info in pairs_found.items():
+        c1, c2 = sorted(info['chains'])
+        suffix = info['suffix']
+        sym_name = f"{c1}_{c2}_{suffix}_sym"
+        
+        m1, m2 = info['metric_1'], info['metric_2']
+        
+        # Add symmetric column in place
+        df_process[sym_name] = df_process[[m1, m2]].max(axis=1)
+        
+        # Mark originals for dropping
+        cols_to_drop.extend([m1, m2])
+            
+    # Drop all asymmetric originals at once
+    cols_to_drop = list(set(cols_to_drop))  # deduplicate
+    df_process.drop(columns=cols_to_drop, inplace=True)
+    
+    return df_process
+
+def add_tra_trb_max(df):
+    """
+    Adds max(TRA, TRB) columns for both naming styles:
+    Keeps all original columns untouched.
+    """
+    new_cols = {}
+    matched = set()
+
+    for col in df.columns:
+        if col == "contact_peptide_TCR":
+            continue
+
+        m = re.match(r"^TRA_(.+)$", col)
+        if m:
+            suffix = m.group(1)
+            pair_col = f"TRB_{suffix}"
+            pair_key = tuple(sorted([col, pair_col]))
+            if pair_col in df.columns and pair_key not in matched:
+                #new_name_min = f"TCR_{suffix}_min"
+                new_name_max = f"TCR_{suffix}_max"
+                #new_cols[new_name_min] = df[[col, pair_col]].min(axis=1)
+                new_cols[new_name_max] = df[[col, pair_col]].max(axis=1)
+                matched.add(pair_key)
+            continue
+
+        # Pattern 2: infix style — x_TRA_metric / x_TRB_metric
+        m = re.match(r"^(.+)_TRA(_.+)$", col)
+        if m:
+            prefix, suffix = m.group(1), m.group(2)
+            pair_col = f"{prefix}_TRB{suffix}"
+            pair_key = tuple(sorted([col, pair_col]))
+            if pair_col in df.columns and pair_key not in matched:
+                #new_name_min = f"{prefix}_TCR{suffix}_min"
+                new_name_max = f"{prefix}_TCR{suffix}_max"
+                #new_cols[new_name_min] = df[[col, pair_col]].min(axis=1)
+                new_cols[new_name_max] = df[[col, pair_col]].max(axis=1)
+                matched.add(pair_key)
+
+    return pd.concat([df, pd.DataFrame(new_cols, index=df.index)], axis=1)
+
+def apply_mask_nocontact(df, mask):
+    #Set to zero every entry in every column of df where the corresponding entry in mask is False
+    df_masked = df.copy()
+    for col in df_masked.columns:
+        if col == "pdb_id" or col == "peptide" or col == "binder" or col == "batch" or col == "contact_peptide_TCR" or col =="sample_name":
+            continue
+        df_masked[col] = df_masked[col].where(mask, 0)
+    return df_masked
+
+
+def process_columns(df):
+    df = df.copy()
+    #df["mean_plddt"] = df["mean_plddt"] / 100.0
+
+    pae_cols = [
+        col for col in df.columns
+        if (("pae" in col) or ("cdr_metric" in col)) and "fract_lt_10" not in col
+    ]
+
+    SCALE = 10  # PAE of 10Å gives score of 0.5 UNDERSTAND BETTER
+    for col in pae_cols:
+        #mask = df[col] == 100
+        df[col] = 1 / (1 + df[col] / SCALE)
+        #df.loc[mask, col] = 0
+
+    #cols_plddt_interface = [col for col in df.columns if "plddt_perinterface" in col]
+    #for col in cols_plddt_interface:
+    #    mask = df[col] == -100
+    #    df.loc[mask, col] = 0
+
+    df = df.copy()
+    
+    
+    df_sym = pool_asymetric_chains(df)
+    df_combined = add_tra_trb_max(df_sym)
+    mask_no_contact_TCRA = df_combined["pep_TRA_is_interface"] == 0
+    mask_no_contact_TCRB = df_combined["pep_TRB_is_interface"] == 0
+    df_combined["contact_peptide_TCR"] = ~ (mask_no_contact_TCRA | mask_no_contact_TCRB)
+    df_masked = apply_mask_nocontact(df_combined, df_combined["contact_peptide_TCR"])
+   
+    df_combined["cdr_metric_general_max"] = (df_combined["pep_TCR_cdr_metric_mean_chain_max"] + df_combined["MHCA_TCR_cdr_metric_mean_chain_max"])/2
+    df_combined["cdr_metric_general_weighted_max"] = (3*df_combined["pep_TCR_cdr_metric_mean_chain_max"] + 2*df_combined["MHCA_TCR_cdr_metric_mean_chain_max"])/5
+    
+    df_masked["cdr_metric_general_max"] = (df_masked["pep_TCR_cdr_metric_mean_chain_max"] + df_masked["MHCA_TCR_cdr_metric_mean_chain_max"])/2
+    df_masked["cdr_metric_general_weighted_max"] = (3*df_masked["pep_TCR_cdr_metric_mean_chain_max"] + 2*df_masked["MHCA_TCR_cdr_metric_mean_chain_max"])/5
+    return df_combined, df_masked
+
+
+def clean_duplicate_metrics(df):
+    cols_to_keep = []
+    seen = set()
+
+    for col in df.columns:
+        parts = col.split('_')
+        pair = sorted(parts[:2])
+        canonical = '_'.join(pair + parts[2:])
+        if canonical not in seen:
+            seen.add(canonical)
+            cols_to_keep.append(col)
+
+    return cols_to_keep
+
+df_results = pd.read_csv("../data/swapped_peptide_ls_3_26_peptides_pos_downsample_neg_resample_hla_withid.csv")
+df_results = df_results.rename(
+    {"name": "pdb_id"}, axis=1)
+
+df_expanded_swapped = pd.read_csv("../data/af3_output/small_db/structInference_10seeds_5diffussion_dbMHCbound/json_unpaired_nopaired_onquerytemplate/collected_af3metrics_expanded_dockQonpMHC.csv")
+df_proc_raw, df_masked = process_columns(df_expanded_swapped)
+all_na_cols = df_masked.columns[df_masked.isna().all()]
+df_masked.drop(columns=all_na_cols, inplace=True)
+cols_to_keep = clean_duplicate_metrics(df_masked)
+df_masked_proc = df_masked[cols_to_keep]
+pae_min_chain_cols = [c for c in df_masked_proc.columns if "min_pae_chain" in c]
+df_masked_proc.drop(columns=pae_min_chain_cols, inplace=True)
+df_all_masked = df_masked_proc.merge(df_results, on="pdb_id")
+
+patterns_remove = ["p20_pae",
+                 "perinterface",
+                 #"TRA",
+                 #"TRB",
+                  "fract_lt_10_",
+                  "mean_pae_chain"]
+
+cols_remove = [c for c in df_all_masked.columns if any(re.search(pattern, c) for pattern in patterns_remove)]
+df_all_masked.drop(columns=cols_remove, inplace=True)
+
+ipsae = [c for c in df_all_masked.columns if "ipsae" in c]
+other_cols = ['af_confidence']  # can expand if needed
+#model_score_cols = [c for c in df_all.columns if "model_score" in c]
+metrics = other_cols + ipsae
+
+df_aggregated_masked = get_top1_model(df_all_masked, metrics)
+score_df_masked = df_aggregated_masked.merge(df_results, on="pdb_id")
