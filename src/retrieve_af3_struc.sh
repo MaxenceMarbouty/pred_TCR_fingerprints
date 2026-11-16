@@ -1,9 +1,11 @@
 #!/bin/bash
 
+PREFIX=$1   # ex: NLFR
 
-MAPPING_CSV="../data/af3_output_base3/selected_structures.csv"
-AF3_BASE_DIR="/net/well/pool/projects2/s253730/projects/pred_TCR_fingerprints/results/af3_output/structInference/json_unpairedMSA_onqueryTemplate"
-DEST_DIR="../data/af3_output_base3/structures"
+
+MAPPING_CSV="../data/${PREFIX}_analysis/af3_output_base3/selected_structures.csv"
+AF3_BASE_DIR="/net/well/pool/projects2/s253730/projects/pred_TCR_fingerprints/results/${PREFIX}_analysis/af3_output/structInference_${PREFIX}/json_unpairedMSA_onqueryTemplate"
+DEST_DIR="../data/${PREFIX}_analysis/af3_output_base3/structures"
 
 
 mkdir -p "$DEST_DIR"
@@ -17,11 +19,11 @@ tail -n +2 "$MAPPING_CSV" | while IFS=',' read -r pdb_id seed_sample rest_of_lin
     pdb_id=$(echo "$pdb_id" | tr -d '\r')
     seed_sample=$(echo "$seed_sample" | tr -d '\r')
 
-    # Reconstruction du nom et chemin du fichier .cif
+    # Reconstructing name of cif model
     cif_filename="${pdb_id}_${seed_sample}_model.cif"
     src_file="${AF3_BASE_DIR}/${pdb_id}/${seed_sample}/${cif_filename}"
 
-    # Vérification de l'existence avant copie
+    # Verifying the file exists before copying it 
     if [ -f "$src_file" ]; then
         cp "$src_file" "${DEST_DIR}/${pdb_id}.cif"
         
